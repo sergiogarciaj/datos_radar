@@ -363,6 +363,18 @@ staff_latest AS (
   ) = 1
 ),
 
+staff_latest_bp AS (
+  SELECT
+    agent_bp_number,
+    supervisor_bp_number
+  FROM `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated`
+  WHERE agent_bp_number IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY agent_bp_number
+    ORDER BY load_datetime DESC
+  ) = 1
+),
+
 agents_conv AS (
   SELECT
     ps.conversation_id,
@@ -503,7 +515,7 @@ final_base AS (
     -- alias ag reemplaza alias a para evitar shadowing del CTE a
     base.agent_bp AS last_agent_bp_number,
     na.agent_name AS last_agent_name,
-    sl.supervisor_bp_number AS last_supervisor_bp_number,
+    COALESCE(sl.supervisor_bp_number, sl_bp.supervisor_bp_number) AS last_supervisor_bp_number,
     ag.all_agent_bp_numbers,
     ag.all_supervisor_bp_numbers,
     r.is_hvc,
@@ -522,9 +534,8 @@ final_base AS (
     ON base.conversation_id = cases_fcr.conversation_id
   LEFT JOIN compliance_unique d       ON base.conversation_id = d.conversation_id AND (d.agent_id IS NULL OR base.agent_id = d.agent_id)
   LEFT JOIN name_agent        na      ON base.agent_bp        = na.agent_bp_number
-  LEFT JOIN staff_latest      sl      
-    ON base.agent_id = sl.agent_id 
-    OR (base.agent_id IS NULL AND base.agent_bp = sl.agent_bp_number)
+  LEFT JOIN staff_latest      sl      ON base.agent_id        = sl.agent_id
+  LEFT JOIN staff_latest_bp   sl_bp   ON base.agent_bp        = sl_bp.agent_bp_number
   LEFT JOIN agents_agg        ag      ON base.conversation_id = ag.conversation_id
   LEFT JOIN retention         r       ON base.conversation_id = r.conversation_id
 ),

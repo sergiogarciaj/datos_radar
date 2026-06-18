@@ -106,7 +106,7 @@ tabla_principal AS (
       WHEN channel_type = 'CC' AND is_human = 'HUMAN'     THEN 'voz'
       WHEN channel_type = 'CC' AND is_human = 'BOTH'      THEN 'voz'
       WHEN channel_type = 'CC' AND is_human = 'NOT_HUMAN' THEN 'voz'
-      WHEN channel_type = 'CASES'                         THEN 'cases'
+      WHEN UPPER(channel_type) = 'CASES'                         THEN 'cases'
     END AS canal,
     mercado AS zona
   FROM `cus-data-dev.radar.sgj_intermedia`
@@ -296,9 +296,9 @@ basefinal AS (
 medallia_data AS (
   SELECT
     conversation_id,
-    MAX(nps) AS nps
+    SAFE_CAST(advisor_bp_number AS INT64) AS agent_bp_number,
+    nps
   FROM `data-exp-contactcenter.TR_Reporting.KS_NPS_CC_V3`
-  GROUP BY conversation_id
 ),
 
 retention AS (
@@ -509,7 +509,9 @@ final_base AS (
     r.is_hvc,
     r.is_recontact
   FROM basefinal AS base
-  LEFT JOIN medallia_data     m       ON base.conversation_id = m.conversation_id
+  LEFT JOIN medallia_data     m       
+    ON base.conversation_id = m.conversation_id
+    AND (base.canal <> 'voz' OR base.agent_bp = m.agent_bp_number)
   -- Modificado: FCR ahora realiza el cruce utilizando conversation_id y agent_id
   LEFT JOIN fcr                       ON base.conversation_id = fcr.conversation_id AND (fcr.agent_id IS NULL OR base.agent_id = fcr.agent_id)
   LEFT JOIN (
@@ -520,7 +522,9 @@ final_base AS (
     ON base.conversation_id = cases_fcr.conversation_id
   LEFT JOIN compliance_unique d       ON base.conversation_id = d.conversation_id AND (d.agent_id IS NULL OR base.agent_id = d.agent_id)
   LEFT JOIN name_agent        na      ON base.agent_bp        = na.agent_bp_number
-  LEFT JOIN staff_latest      sl      ON base.agent_id        = sl.agent_id
+  LEFT JOIN staff_latest      sl      
+    ON base.agent_id = sl.agent_id 
+    OR (base.agent_id IS NULL AND base.agent_bp = sl.agent_bp_number)
   LEFT JOIN agents_agg        ag      ON base.conversation_id = ag.conversation_id
   LEFT JOIN retention         r       ON base.conversation_id = r.conversation_id
 ),

@@ -261,10 +261,11 @@ base AS (
       when ad.agent_bp_number is null then sap.bp_num
       else null
       end as agent_bp_number,
+    ad.agent_id,
     ad.supervisor_bp_number,
     c.agent_email
   FROM `cuscare-data-prod.cases.cus_claim` AS c    
-  LEFT JOIN agent_data AS ad ON c.agent_email = ad.agent_email
+  LEFT JOIN agent_data AS ad ON LOWER(c.agent_email) = LOWER(ad.agent_email)
   left join sap on lower(c.agent_email)=sap.employee_email
   WHERE 1=1
     AND DATE(created_dt) >= start_date
@@ -401,7 +402,7 @@ final_union AS (
     [STRUCT(
       CAST(NULL AS STRING) AS skill_name,
       CAST(agent_bp_number AS INT64) AS bp_executive_num,
-      CAST(NULL AS STRING) AS agent_id,
+      ANY_VALUE(agent_id) AS agent_id,
       CAST(NULL AS FLOAT64) AS aht,
       'cases' AS Canal_de_Atencion,
       CAST(NULL AS STRING) AS Departamento_SAG,

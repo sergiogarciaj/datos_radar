@@ -95,6 +95,7 @@ tabla_principal AS (
     second_category,
     third_category,
     mercado,
+    sag_name,
     CASE
       WHEN channel_type IS NULL                            THEN 'voz'
       WHEN channel_type = 'voice'                         THEN 'voz'
@@ -284,6 +285,7 @@ basefinal AS (
     'HUMAN'                  AS is_human,
     NULL                     AS skill_lookup,
     NULL                     AS all_agents,
+    CAST(NULL AS STRING)     AS sag_name,
     canal                    AS canal,
     zona,
     valor                    AS factor,
@@ -303,8 +305,9 @@ medallia_data AS (
   SELECT
     conversation_id,
     SAFE_CAST(advisor_bp_number AS INT64) AS agent_bp_number,
+    last_sag_contact_description,
     nps AS nps
-  FROM `data-exp-contactcenter.TR_Reporting.KS_NPS_CC_V3`
+  FROM `cus-data-prod.dmt_customer_us.medallia_contact_center_responses`
 ),
 
 retention AS (
@@ -526,7 +529,7 @@ final_base AS (
   FROM basefinal AS base
   LEFT JOIN medallia_data     m       
     ON base.conversation_id = m.conversation_id
-    AND (base.canal <> 'voz' OR base.agent_bp = m.agent_bp_number)
+    AND (base.canal <> 'voz' OR base.is_human = 'NOT_HUMAN' OR base.agent_bp = m.agent_bp_number)
   LEFT JOIN fcr                       ON base.conversation_id = fcr.conversation_id AND (fcr.agent_id IS NULL OR base.agent_id = fcr.agent_id)
   LEFT JOIN (
     SELECT DISTINCT conversationid, fcr_ai

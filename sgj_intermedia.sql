@@ -19,6 +19,7 @@ grouped_raw_agg AS (
     ARRAY_CONCAT_AGG(skill_lookup) AS skill_lookup_raw,
     ARRAY_CONCAT_AGG(all_agents) AS all_agents_raw,
     ANY_VALUE(mercado) AS mercado,
+    ANY_VALUE(sag_name) AS sag_name,
     ANY_VALUE(cat_pca) AS fallback_cat_pca,
     ANY_VALUE(second_category) AS fallback_second_category,
     ANY_VALUE(third_category) AS fallback_third_category
@@ -54,6 +55,7 @@ grouped_raw AS (
       ELSE ARRAY(SELECT DISTINCT AS STRUCT * FROM UNNEST(all_agents_raw))
     END AS all_agents,
     mercado,
+    sag_name,
     fallback_cat_pca,
     fallback_second_category,
     fallback_third_category
@@ -116,6 +118,7 @@ grouped_final AS (
     COALESCE(bac.cats.second_category, g.fallback_second_category) AS second_category,
     COALESCE(bac.cats.third_category, g.fallback_third_category) AS third_category,
     g.all_agents,
+    g.sag_name,
     g.mercado
   FROM grouped_raw g
   LEFT JOIN best_agent_categories bac
@@ -137,6 +140,7 @@ SELECT
   second_category,
   third_category,
   all_agents,
+  sag_name,
   mercado
 FROM `cus-data-dev.radar.sgj_calculated`
 WHERE channel_type NOT IN ('webmessaging', 'whatsapp')
@@ -159,5 +163,6 @@ SELECT
   second_category,
   third_category,
   all_agents,
+  sag_name,
   mercado
 FROM grouped_final;

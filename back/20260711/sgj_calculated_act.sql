@@ -56,7 +56,6 @@ basequ_enriched AS (
     qua.message_type, 
     qua.agent_bp_number AS bp_executive_num,
     qua.agent_id,
-    qua.sag_name AS sag_name,
     -- Columnas explícitas del diccionario de skills
     sk.Canal_de_Atencion,
     sk.Departamento_SAG,
@@ -139,7 +138,7 @@ basequ_enriched AS (
   WHERE rn = 1
 )
 
--- CTE Categorías Crudas (PCA Voz + Chat/WhatsApp)
+-- CTE Categorías Crudas (PCA)
 ,raw_data AS (
   SELECT
     conversation_id,
@@ -148,20 +147,7 @@ basequ_enriched AS (
     second_category,
     third_category
   FROM `cuscare-data-prod.post_call_analytics.pca_conversation_category` cat   
-  LEFT JOIN pte ON pte.participant_id = cat.participant_id
-  WHERE DATE(load_datetime) >= start_date 
-    AND DATE(load_datetime) < CURRENT_DATE()
-
-  UNION ALL
-
-  SELECT
-    conversation_id,
-    pte.agent_id,
-    first_category,
-    second_category,
-    third_category
-  FROM `cuscare-data-prod.post_call_analytics.post_whatsapp_analytics_conversation_category` cat   
-  LEFT JOIN pte ON pte.participant_id = cat.participant_id
+  left join pte on pte.participant_id=cat.participant_id
   WHERE DATE(load_datetime) >= start_date 
     AND DATE(load_datetime) < CURRENT_DATE()
 ),
@@ -213,7 +199,6 @@ qu AS (
     b.message_type,
     b.market_code,
     b.Canal_de_Atencion, 
-    b.sag_name,
     -- Unión inteligente: prioriza coincidencia exacta, de lo contrario fallback al agente nulo de PCA
     COALESCE(pca_exact.first_category, pca_fallback.first_category) AS first_category,
     COALESCE(pca_exact.second_category, pca_fallback.second_category) AS second_category,
@@ -345,7 +330,6 @@ full_calls AS (
       WHEN qu.conversation_id = bot.interaction_id THEN 'BOTH'
     END AS is_human,
     qu.skill_lookup,
-    qu.sag_name,
     -- Pasamos las categorías mapeadas por segmento
     qu.first_category AS cat_pca,
     qu.second_category,
@@ -373,7 +357,6 @@ full_calls AS (
     category_voicebot_typification AS cat_bot,
     'NOT_HUMAN' AS is_human,
     NULL AS skill_lookup,
-    CAST(NULL AS STRING) AS sag_name,
     NULL AS cat_pca,
     NULL AS second_category,
     NULL AS third_category
@@ -396,7 +379,6 @@ final_union AS (
     full_calls.cat_pca,
     full_calls.second_category,
     full_calls.third_category,
-    full_calls.sag_name,
     -- Adjuntamos el historial completo de agentes desde la CTE agregada a nivel de conversación
     pca_convo.all_agents,
     null as agent_email
@@ -438,7 +420,6 @@ final_union AS (
     ARRAY_AGG(claim_ai_subtypification IGNORE NULLS ORDER BY created_dt DESC LIMIT 1)[OFFSET(0)] AS cat_pca,
     NULL AS second_category,
     NULL AS third_category,
-    CAST(NULL AS STRING) AS sag_name,
     NULL AS all_agents,
     agent_email
   FROM base
@@ -461,7 +442,6 @@ SELECT
   u.third_category,
   u.all_agents,
   u.agent_email,
-  u.sag_name,
   CASE 
     WHEN u.market_code = 'BR' THEN 'BR'
     WHEN (u.market_code IS NULL AND s.country IS NOT NULL) THEN UPPER(s.country)

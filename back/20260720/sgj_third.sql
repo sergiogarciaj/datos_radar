@@ -360,6 +360,30 @@ retention AS (
   ) = 1
 ),
 
+staff_latest AS (
+  SELECT
+    agent_id,
+    agent_bp_number,
+    supervisor_bp_number
+  FROM `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY agent_id
+    ORDER BY load_datetime DESC
+  ) = 1
+),
+
+staff_latest_bp AS (
+  SELECT
+    agent_bp_number,
+    supervisor_bp_number
+  FROM `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated`
+  WHERE agent_bp_number IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY agent_bp_number
+    ORDER BY load_datetime DESC
+  ) = 1
+),
+
 agents_conv AS (
   SELECT
     ps.conversation_id,
@@ -369,18 +393,9 @@ agents_conv AS (
     s.supervisor_bp_number,
     ps.load_datetime
   FROM `cuscare-data-prod.contact_center_interaction_model.participant_session` ps
-  LEFT JOIN `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated` AS s
-    ON ps.participant_id = s.agent_id
+  LEFT JOIN staff_latest AS s ON ps.participant_id   = s.agent_id
   LEFT JOIN name_agent   AS n ON s.agent_bp_number   = n.agent_bp_number
   WHERE ps.purpose = 'agent'
-  QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY ps.conversation_id, ps.participant_id
-    ORDER BY
-      CASE WHEN s.period_id >= CAST(FORMAT_DATE('%Y%m', DATE(ps.load_datetime)) AS INT64) THEN 0 ELSE 1 END ASC,
-      CASE WHEN s.period_id >= CAST(FORMAT_DATE('%Y%m', DATE(ps.load_datetime)) AS INT64) THEN s.period_id ELSE NULL END ASC,
-      CASE WHEN s.period_id < CAST(FORMAT_DATE('%Y%m', DATE(ps.load_datetime)) AS INT64) THEN s.period_id ELSE NULL END DESC,
-      s.load_datetime DESC
-  ) = 1
 ),
 
 agents_agg AS (
@@ -534,38 +549,8 @@ final_base AS (
     ON base.conversation_id = cases_fcr.conversation_id
   LEFT JOIN compliance_unique d       ON base.conversation_id = d.conversation_id AND (d.agent_id IS NULL OR base.agent_id = d.agent_id)
   LEFT JOIN name_agent        na      ON base.agent_bp        = na.agent_bp_number
-  LEFT JOIN (
-    SELECT
-      base_in.conversation_id,
-      s_in.supervisor_bp_number,
-      ROW_NUMBER() OVER (
-        PARTITION BY base_in.conversation_id
-        ORDER BY
-          CASE WHEN s_in.period_id >= CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN 0 ELSE 1 END ASC,
-          CASE WHEN s_in.period_id >= CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN s_in.period_id ELSE NULL END ASC,
-          CASE WHEN s_in.period_id < CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN s_in.period_id ELSE NULL END DESC,
-          s_in.load_datetime DESC
-      ) AS rn
-    FROM basefinal AS base_in
-    JOIN `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated` AS s_in
-      ON base_in.agent_id = s_in.agent_id
-  ) sl ON base.conversation_id = sl.conversation_id AND sl.rn = 1
-  LEFT JOIN (
-    SELECT
-      base_in.conversation_id,
-      s_in.supervisor_bp_number,
-      ROW_NUMBER() OVER (
-        PARTITION BY base_in.conversation_id
-        ORDER BY
-          CASE WHEN s_in.period_id >= CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN 0 ELSE 1 END ASC,
-          CASE WHEN s_in.period_id >= CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN s_in.period_id ELSE NULL END ASC,
-          CASE WHEN s_in.period_id < CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN s_in.period_id ELSE NULL END DESC,
-          s_in.load_datetime DESC
-      ) AS rn
-    FROM basefinal AS base_in
-    JOIN `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated` AS s_in
-      ON base_in.agent_bp = s_in.agent_bp_number
-  ) sl_bp ON base.conversation_id = sl_bp.conversation_id AND sl_bp.rn = 1
+  LEFT JOIN staff_latest      sl      ON base.agent_id        = sl.agent_id
+  LEFT JOIN staff_latest_bp   sl_bp   ON base.agent_bp        = sl_bp.agent_bp_number
   LEFT JOIN agents_agg        ag      ON base.conversation_id = ag.conversation_id
   LEFT JOIN retention         r       ON base.conversation_id = r.conversation_id
 ),

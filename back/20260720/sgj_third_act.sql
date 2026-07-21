@@ -1,7 +1,7 @@
-CREATE OR REPLACE TABLE `cus-data-dev.radar.sgj_third`
-PARTITION BY call_date
-CLUSTER BY conversation_id AS
+DECLARE start_date DATE;
+SET start_date = DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH);
 
+CREATE OR REPLACE TABLE `cus-data-dev.radar.sgj_third_temp` AS
 WITH
 
 -- ============================================================
@@ -75,11 +75,8 @@ b AS (
 
 -- ============================================================
 -- TABLA PRINCIPAL: Lectura única de new_calculated.
--- Se define ANTES que el CTE a para que a pueda derivarse
--- de aquí y evitar un segundo scan completo de la tabla.
 -- ============================================================
 tabla_principal AS (
-  -- Columnas explícitas de new_calculated (equivalente al SELECT * del original).
   SELECT
     conversation_id,
     (SELECT agent_id FROM UNNEST(skill_lookup) ORDER BY aht DESC LIMIT 1) as agent_id,
@@ -111,9 +108,10 @@ tabla_principal AS (
     END AS canal,
     mercado AS zona
   FROM `cus-data-dev.radar.sgj_intermedia`
+  WHERE call_date >= start_date -- ⚡ OPTIMIZACIÓN
 ),
 
--- a: conteo agregado derivado de tabla_principal (evita doble scan de new_calculated)
+-- a: conteo agregado derivado de tabla_principal
 a AS (
   SELECT
     FORMAT_DATE('%Y-%m', call_date) AS mes,
@@ -260,7 +258,15 @@ basefinal AS (
       SELECT DISTINCT TRIM(tip) AS tip, conversationid AS conversation_id
       FROM `data-exp-contactcenter.ws_tpo_resp.indicadores_t_stg`
     ) AS tip_data ON tip_data.conversation_id = tp.conversation_id
-    LEFT JOIN `cuscare-data-prod.post_call_analytics.post_text_analytics_conversation_category` AS cases_cat ON cases_cat.conversation_id = tp.conversation_id
+    LEFT JOIN (
+      SELECT
+        conversation_id,
+        first_category,
+        second_category,
+        third_category
+      FROM `cuscare-data-prod.post_call_analytics.post_text_analytics_conversation_category`
+      WHERE load_datetime >= start_date
+    ) AS cases_cat ON cases_cat.conversation_id = tp.conversation_id
   )
 
   UNION ALL
@@ -288,19 +294,19 @@ basefinal AS (
     'NOT_CATEGORIZED'        AS category
   FROM b
   WHERE canal = 'rrss'
+    AND DATE(CONCAT(mes, '-01')) >= start_date -- ⚡ OPTIMIZACIÓN
   GROUP BY ALL
 ),
 
 -- ============================================================
 -- ENRIQUECIMIENTO: NPS, Agentes, FCR, Calidad
--- (AHT proviene de skill_lookup[SAFE_OFFSET(0)].aht en sgj_calculated)
 -- ============================================================
 medallia_data AS (
   SELECT
     conversation_id,
     SAFE_CAST(advisor_bp_number AS INT64) AS agent_bp_number,
     last_sag_contact_description,
-    nps
+    nps AS nps
   FROM `cus-data-prod.dmt_customer_us.medallia_contact_center_responses`
 ),
 
@@ -310,7 +316,7 @@ retention AS (
     is_hvc,
     is_recontact
   FROM `cus-data-prod.voicebot_metrics.voicebot_retention`
-  WHERE DATE(conversation_start_dt) >= '2024-01-01'
+  WHERE DATE(conversation_start_dt) >= start_date -- ⚡ OPTIMIZACIÓN
 )
 
 
@@ -324,18 +330,21 @@ retention AS (
     SELECT conversation_id, participant_id, SAFE_CAST(agent_bp_number AS INT64) AS agent_bp_number
     FROM `cuscare-data-prod.post_call_analytics.pca_audio_process`
     WHERE participant_id IS NOT NULL
+      AND load_datetime >= start_date -- ⚡ OPTIMIZACIÓN
     
     UNION DISTINCT
     
     SELECT conversation_id, participant_id, SAFE_CAST(agent_bp_number AS INT64) AS agent_bp_number
     FROM `cuscare-data-prod.post_call_analytics.post_text_analytics_audios_process`
     WHERE participant_id IS NOT NULL
+      AND load_datetime >= start_date -- ⚡ OPTIMIZACIÓN
 
     UNION DISTINCT
 
     SELECT conversation_id, participant_id, SAFE_CAST(agent_bp_number AS INT64) AS agent_bp_number
     FROM `cuscare-data-prod.post_call_analytics.post_whatsapp_analytics_process`
     WHERE participant_id IS NOT NULL
+      AND load_datetime >= start_date -- ⚡ OPTIMIZACIÓN
   ) m
   JOIN (
     SELECT
@@ -360,6 +369,30 @@ retention AS (
   ) = 1
 ),
 
+staff_latest AS (
+  SELECT
+    agent_id,
+    agent_bp_number,
+    supervisor_bp_number
+  FROM `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY agent_id
+    ORDER BY load_datetime DESC
+  ) = 1
+),
+
+staff_latest_bp AS (
+  SELECT
+    agent_bp_number,
+    supervisor_bp_number
+  FROM `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated`
+  WHERE agent_bp_number IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY agent_bp_number
+    ORDER BY load_datetime DESC
+  ) = 1
+),
+
 agents_conv AS (
   SELECT
     ps.conversation_id,
@@ -369,18 +402,10 @@ agents_conv AS (
     s.supervisor_bp_number,
     ps.load_datetime
   FROM `cuscare-data-prod.contact_center_interaction_model.participant_session` ps
-  LEFT JOIN `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated` AS s
-    ON ps.participant_id = s.agent_id
+  LEFT JOIN staff_latest AS s ON ps.participant_id   = s.agent_id
   LEFT JOIN name_agent   AS n ON s.agent_bp_number   = n.agent_bp_number
   WHERE ps.purpose = 'agent'
-  QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY ps.conversation_id, ps.participant_id
-    ORDER BY
-      CASE WHEN s.period_id >= CAST(FORMAT_DATE('%Y%m', DATE(ps.load_datetime)) AS INT64) THEN 0 ELSE 1 END ASC,
-      CASE WHEN s.period_id >= CAST(FORMAT_DATE('%Y%m', DATE(ps.load_datetime)) AS INT64) THEN s.period_id ELSE NULL END ASC,
-      CASE WHEN s.period_id < CAST(FORMAT_DATE('%Y%m', DATE(ps.load_datetime)) AS INT64) THEN s.period_id ELSE NULL END DESC,
-      s.load_datetime DESC
-  ) = 1
+    AND DATE(ps.load_datetime) >= start_date -- ⚡ OPTIMIZACIÓN
 ),
 
 agents_agg AS (
@@ -395,9 +420,6 @@ agents_agg AS (
   GROUP BY conversation_id
 ),
 
--- QUALIFY deduplica correctamente: 1 fila por conversation_id.
--- La versión original retornaba N filas (window sin deduplicar),
--- lo que causaba los duplicados que el SELECT DISTINCT parchaba.
 fcr AS (
   SELECT DISTINCT
     pca.conversation_id,
@@ -413,7 +435,7 @@ fcr AS (
   ) pca
   LEFT JOIN pte ON pte.conversation_id = pca.conversation_id AND pte.participant_id = pca.participant_id
   WHERE is_first_call_resolution IS NOT NULL
-    AND load_datetime >= '2024-01-01'
+    AND load_datetime >= start_date -- ⚡ OPTIMIZACIÓN
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY pca.conversation_id, COALESCE(pte.agent_id, 'NULL_AGENT')
     ORDER BY pte.agent_id
@@ -509,10 +531,7 @@ final_base AS (
       ELSE NULL
     END AS fcr,
     IF(base.canal = 'cases', cases_fcr.reason_resolution_fcr, fcr.reason_resolution_fcr) AS reason_resolution_fcr,
-    -- Reutiliza nota_calidad precalculada con IFNULL desde compliance_unique.
-    -- La suma directa de la versión original producía NULL si algún peso era NULL.
     d.nota_calidad,
-    -- alias ag reemplaza alias a para evitar shadowing del CTE a
     base.agent_bp AS last_agent_bp_number,
     na.agent_name AS last_agent_name,
     COALESCE(sl.supervisor_bp_number, sl_bp.supervisor_bp_number) AS last_supervisor_bp_number,
@@ -524,48 +543,23 @@ final_base AS (
   LEFT JOIN medallia_data     m       
     ON base.conversation_id = m.conversation_id
     AND (base.canal <> 'voz' OR base.is_human = 'NOT_HUMAN' OR base.agent_bp = m.agent_bp_number)
-  -- Modificado: FCR ahora realiza el cruce utilizando conversation_id y agent_id
   LEFT JOIN fcr                       ON base.conversation_id = fcr.conversation_id AND (fcr.agent_id IS NULL OR base.agent_id = fcr.agent_id)
   LEFT JOIN (
     SELECT DISTINCT conversationid, fcr_ai
     FROM `data-exp-contactcenter.ws_tpo_resp.indicadores_t_stg`
   ) AS fcrchat                        ON base.conversation_id = fcrchat.conversationid
-  LEFT JOIN `cuscare-data-prod.post_call_analytics.post_text_analytics_resolution_fcr` AS cases_fcr
-    ON base.conversation_id = cases_fcr.conversation_id
+  LEFT JOIN (
+    SELECT
+      conversation_id,
+      is_first_call_resolution,
+      reason_resolution_fcr
+    FROM `cuscare-data-prod.post_call_analytics.post_text_analytics_resolution_fcr`
+    WHERE load_datetime >= start_date
+  ) AS cases_fcr ON base.conversation_id = cases_fcr.conversation_id
   LEFT JOIN compliance_unique d       ON base.conversation_id = d.conversation_id AND (d.agent_id IS NULL OR base.agent_id = d.agent_id)
   LEFT JOIN name_agent        na      ON base.agent_bp        = na.agent_bp_number
-  LEFT JOIN (
-    SELECT
-      base_in.conversation_id,
-      s_in.supervisor_bp_number,
-      ROW_NUMBER() OVER (
-        PARTITION BY base_in.conversation_id
-        ORDER BY
-          CASE WHEN s_in.period_id >= CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN 0 ELSE 1 END ASC,
-          CASE WHEN s_in.period_id >= CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN s_in.period_id ELSE NULL END ASC,
-          CASE WHEN s_in.period_id < CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN s_in.period_id ELSE NULL END DESC,
-          s_in.load_datetime DESC
-      ) AS rn
-    FROM basefinal AS base_in
-    JOIN `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated` AS s_in
-      ON base_in.agent_id = s_in.agent_id
-  ) sl ON base.conversation_id = sl.conversation_id AND sl.rn = 1
-  LEFT JOIN (
-    SELECT
-      base_in.conversation_id,
-      s_in.supervisor_bp_number,
-      ROW_NUMBER() OVER (
-        PARTITION BY base_in.conversation_id
-        ORDER BY
-          CASE WHEN s_in.period_id >= CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN 0 ELSE 1 END ASC,
-          CASE WHEN s_in.period_id >= CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN s_in.period_id ELSE NULL END ASC,
-          CASE WHEN s_in.period_id < CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN s_in.period_id ELSE NULL END DESC,
-          s_in.load_datetime DESC
-      ) AS rn
-    FROM basefinal AS base_in
-    JOIN `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated` AS s_in
-      ON base_in.agent_bp = s_in.agent_bp_number
-  ) sl_bp ON base.conversation_id = sl_bp.conversation_id AND sl_bp.rn = 1
+  LEFT JOIN staff_latest      sl      ON base.agent_id        = sl.agent_id
+  LEFT JOIN staff_latest_bp   sl_bp   ON base.agent_bp        = sl_bp.agent_bp_number
   LEFT JOIN agents_agg        ag      ON base.conversation_id = ag.conversation_id
   LEFT JOIN retention         r       ON base.conversation_id = r.conversation_id
 ),
@@ -630,13 +624,9 @@ with_factor_plus AS (
 
 -- ============================================================
 -- SELECT FINAL
--- El UPDATE original (fcr/nota_calidad = NULL para voz
--- NOT_CATEGORIZED > 2026-01-01) queda integrado aquí como
--- expresiones CASE, eliminando la segunda pasada DML.
 -- ============================================================
 SELECT DISTINCT
   wfp.* EXCEPT(fcr, nota_calidad),
-  -- UPDATE integrado: anula fcr para voz NOT_CATEGORIZED posterior a 2026-01-01
   CASE
     WHEN wfp.is_human   = 'HUMAN'
       AND wfp.canal     = 'voz'
@@ -645,8 +635,6 @@ SELECT DISTINCT
     THEN NULL
     ELSE wfp.fcr
   END AS fcr,
-  -- UPDATE integrado: anula nota_calidad solo cuando fcr tampoco era NULL
-  -- (replica exactamente la condición AND fcr IS NOT NULL del UPDATE original)
   CASE
     WHEN wfp.is_human   = 'HUMAN'
       AND wfp.canal     = 'voz'
@@ -656,4 +644,12 @@ SELECT DISTINCT
     THEN NULL
     ELSE wfp.nota_calidad
   END AS nota_calidad
-FROM with_factor_plus wfp
+FROM with_factor_plus wfp;
+
+DELETE FROM `cus-data-dev.radar.sgj_third`
+WHERE call_date >= start_date;
+
+INSERT INTO `cus-data-dev.radar.sgj_third`
+SELECT * FROM `cus-data-dev.radar.sgj_third_temp`;
+
+DROP TABLE `cus-data-dev.radar.sgj_third_temp`;

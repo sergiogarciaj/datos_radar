@@ -1,10 +1,11 @@
-DECLARE start_date DATE;
-SET start_date = DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH);
+DROP TABLE IF EXISTS `cus-data-dev.radar.sgj_calculated`;
 
-DELETE FROM `cus-data-dev.radar.sgj_calculated`
-WHERE call_date >= start_date;
+CREATE OR REPLACE TABLE `cus-data-dev.radar.sgj_calculated`
+PARTITION BY call_date
+CLUSTER BY conversation_id AS
 
-INSERT INTO `cus-data-dev.radar.sgj_calculated`
+
+
 WITH agent_data AS (
   SELECT
     agent_id,
@@ -41,7 +42,7 @@ ret AS (
     conversation_id,
     ANY_VALUE(market_code) AS market_code
   FROM `cuscare-data-prod.virtual_assistant_metrics.bot_retention`
-  WHERE DATE(conversation_start_datetime) >= start_date
+  WHERE DATE(conversation_start_datetime) >= '2024-01-01'
     AND DATE(conversation_start_datetime) <= CURRENT_DATE()
   GROUP BY conversation_id
 ),
@@ -56,7 +57,6 @@ basequ_enriched AS (
     qua.message_type, 
     qua.agent_bp_number AS bp_executive_num,
     qua.agent_id,
-    qua.sag_name AS sag_name,
     -- Columnas explícitas del diccionario de skills
     sk.Canal_de_Atencion,
     sk.Departamento_SAG,
@@ -93,7 +93,9 @@ basequ_enriched AS (
   LEFT JOIN ret 
     ON qua.conversation_id = ret.conversation_id
   WHERE 1=1
-    AND qua.conversation_date >= start_date 
+    --AND EXTRACT(MONTH FROM qua.conversation_date) = 1
+    --AND EXTRACT(YEAR FROM qua.conversation_date) = 2026   
+    AND EXTRACT(YEAR FROM qua.conversation_date) >= 2024 
     AND qua.conversation_date <= CURRENT_DATE() 
     AND qua.factory_name IN (
       'AeC', 'Almacontact', 'KONECTA BR', 'Konecta', 
@@ -133,37 +135,27 @@ basequ_enriched AS (
     SELECT 
       participant_id, 
       user_id as agent_id,
+      -- Cambia el ORDER BY según tu lógica (ej. por una columna de fecha)
       ROW_NUMBER() OVER (PARTITION BY participant_id ORDER BY user_id DESC) as rn
     FROM `cuscare-data-prod.contact_center_interaction_model.participant_session`
   )
   WHERE rn = 1
 )
 
--- CTE Categorías Crudas (PCA Voz + Chat/WhatsApp)
+-- CTE Categorías Crudas (PCA)
 ,raw_data AS (
   SELECT
     conversation_id,
+    --SPLIT(conversation_id_original, '_')[SAFE_OFFSET(1)] AS agent_id,
     pte.agent_id,
     first_category,
     second_category,
     third_category
   FROM `cuscare-data-prod.post_call_analytics.pca_conversation_category` cat   
-  LEFT JOIN pte ON pte.participant_id = cat.participant_id
-  WHERE DATE(load_datetime) >= start_date 
-    AND DATE(load_datetime) < CURRENT_DATE()
+  left join pte on pte.participant_id=cat.participant_id
 
-  UNION ALL
-
-  SELECT
-    conversation_id,
-    pte.agent_id,
-    first_category,
-    second_category,
-    third_category
-  FROM `cuscare-data-prod.post_call_analytics.post_whatsapp_analytics_conversation_category` cat   
-  LEFT JOIN pte ON pte.participant_id = cat.participant_id
-  WHERE DATE(load_datetime) >= start_date 
-    AND DATE(load_datetime) < CURRENT_DATE()
+  WHERE load_datetime >= '2024-01-01' 
+    AND load_datetime < CURRENT_DATE()
 ),
 
 -- CTE PCA por Agente: Obtiene la mejor categoría para cada par (conversation_id, agent_id)
@@ -213,7 +205,6 @@ qu AS (
     b.message_type,
     b.market_code,
     b.Canal_de_Atencion, 
-    b.sag_name,
     -- Unión inteligente: prioriza coincidencia exacta, de lo contrario fallback al agente nulo de PCA
     COALESCE(pca_exact.first_category, pca_fallback.first_category) AS first_category,
     COALESCE(pca_exact.second_category, pca_fallback.second_category) AS second_category,
@@ -277,13 +268,13 @@ base AS (
       else null
       end as agent_bp_number,
     ad.agent_id,
-    ad.supervisor_bp_number,
     c.agent_email
-  FROM `cuscare-data-prod.cases.cus_claim` AS c    
+  FROM `cuscare-data-prod.cases.cus_claim` AS c
   LEFT JOIN agent_data AS ad ON LOWER(c.agent_email) = LOWER(ad.agent_email)
   left join sap on lower(c.agent_email)=sap.employee_email
   WHERE 1=1
-    AND DATE(created_dt) >= start_date
+    --AND created_dt between '2026-01-01' and '2026-01-31'
+    AND EXTRACT(YEAR FROM created_dt) IN (2024, 2025, 2026)
     AND NOT REGEXP_CONTAINS(tag_list, r"monoquebrado|multiquebrado")
     AND tag_list NOT LIKE '%project_child%'
     AND UPPER(agent_name) != 'LATAM AIRLINES'
@@ -321,7 +312,8 @@ bots AS (
     voicebot_category_process
   FROM `cuscare-data-prod.virtual_assistant_metrics.bot_retention`
   WHERE 1=1
-    AND DATE(conversation_start_datetime) >= start_date 
+    --AND DATE(conversation_start_datetime) between '2026-01-01' and '2026-01-31'
+    AND DATE(conversation_start_datetime) >= '2024-01-01' 
     AND DATE(conversation_start_datetime) < CURRENT_DATE()
     AND originating_direction_type = 'inbound'
     AND is_voicebot = 1
@@ -345,7 +337,6 @@ full_calls AS (
       WHEN qu.conversation_id = bot.interaction_id THEN 'BOTH'
     END AS is_human,
     qu.skill_lookup,
-    qu.sag_name,
     -- Pasamos las categorías mapeadas por segmento
     qu.first_category AS cat_pca,
     qu.second_category,
@@ -373,7 +364,6 @@ full_calls AS (
     category_voicebot_typification AS cat_bot,
     'NOT_HUMAN' AS is_human,
     NULL AS skill_lookup,
-    CAST(NULL AS STRING) AS sag_name,
     NULL AS cat_pca,
     NULL AS second_category,
     NULL AS third_category
@@ -396,10 +386,9 @@ final_union AS (
     full_calls.cat_pca,
     full_calls.second_category,
     full_calls.third_category,
-    full_calls.sag_name,
     -- Adjuntamos el historial completo de agentes desde la CTE agregada a nivel de conversación
     pca_convo.all_agents,
-    null as agent_email
+    null as agent_email,
   FROM full_calls
   LEFT JOIN pca_convo 
     ON full_calls.conversation_id = pca_convo.conversation_id
@@ -438,14 +427,14 @@ final_union AS (
     ARRAY_AGG(claim_ai_subtypification IGNORE NULLS ORDER BY created_dt DESC LIMIT 1)[OFFSET(0)] AS cat_pca,
     NULL AS second_category,
     NULL AS third_category,
-    CAST(NULL AS STRING) AS sag_name,
     NULL AS all_agents,
-    agent_email
+    agent_email,
   FROM base
   GROUP BY ticket_id, agent_bp_number, agent_email
 )
 
 -- INSERCIÓN FINAL Y RESOLUCIÓN DE MERCADOS
+--, calculated as (
 SELECT 
   u.conversation_id,
   u.call_date,
@@ -461,7 +450,6 @@ SELECT
   u.third_category,
   u.all_agents,
   u.agent_email,
-  u.sag_name,
   CASE 
     WHEN u.market_code = 'BR' THEN 'BR'
     WHEN (u.market_code IS NULL AND s.country IS NOT NULL) THEN UPPER(s.country)
@@ -470,4 +458,4 @@ SELECT
   END AS mercado
 FROM final_union AS u
 LEFT JOIN `data-exp-contactcenter.ws_tpo_resp.novoz` AS s
-  ON u.skill_name[SAFE_OFFSET(0)] = s.sagg;
+  ON u.skill_name[SAFE_OFFSET(0)] = s.sagg

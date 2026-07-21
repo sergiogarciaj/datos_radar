@@ -29,17 +29,29 @@ with open(file_path, 'r') as f:
 
 # Escribe un script temporal que SQLAlchemy pueda ejecutar dentro del contenedor
 python_code = f"""
+import os
+from datetime import datetime
 from database import SessionLocal
 from models import SavedQuery
 
 db = SessionLocal()
 query = db.query(SavedQuery).filter(SavedQuery.name == '{query_name}').first()
 if query:
+    # ------------------ BACKUP ------------------ #
+    backup_date = datetime.now().strftime("%Y%m%d")
+    backup_dir = f"/app/exported_queries/backups/{{backup_date}}"
+    os.makedirs(backup_dir, exist_ok=True)
+    backup_path = f"{{backup_dir}}/{{query.name}}_{{datetime.now().strftime('%H%M%S')}}.sql"
+    with open(backup_path, 'w', encoding='utf-8') as b_file:
+        b_file.write(query.sql_query)
+    print(f"✅ Respaldo previo de '{{query.name}}' guardado en {{backup_path}}")
+    # -------------------------------------------- #
+
     query.sql_query = {repr(sql_content)}
     db.commit()
-    print(f"✅ '{{query_name}}' ha sido actualizada en la base de datos Seldon.")
+    print(f"✅ '{{query.name}}' ha sido actualizada en la base de datos Seldon.")
 else:
-    print(f"❌ La consulta '{{query_name}}' no existe en la base de datos. Debes crearla primero en la interfaz.")
+    print(f"❌ La consulta '{query_name}' no existe en la base de datos. Debes crearla primero en la interfaz.")
 """
 
 temp_script_path = '/home/sergio/seldon/bq_metadata_manager/backend/temp_update.py'

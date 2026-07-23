@@ -255,7 +255,7 @@ qu AS (
 -- CTE Casos: Filtros aplicados a reclamos/casos humanos
 base AS (
   SELECT
-    ticket_id,
+    c.ticket_id,
     created_dt,
     agent_group_name,
     factory_name,
@@ -280,7 +280,23 @@ base AS (
     ad.supervisor_bp_number,
     c.agent_email
   FROM `cuscare-data-prod.cases.cus_claim` AS c    
-  LEFT JOIN agent_data AS ad ON LOWER(c.agent_email) = LOWER(ad.agent_email)
+  LEFT JOIN (
+    SELECT
+      c_in.ticket_id,
+      ad_in.agent_bp_number,
+      ad_in.agent_id,
+      ad_in.supervisor_bp_number,
+      ROW_NUMBER() OVER (
+        PARTITION BY c_in.ticket_id
+        ORDER BY
+          ABS(DATE_DIFF(PARSE_DATE('%Y%m', CAST(ad_in.period_id AS STRING)), DATE_TRUNC(DATE(c_in.created_dt), MONTH), MONTH)) ASC,
+          CASE WHEN ad_in.period_id >= CAST(FORMAT_DATE('%Y%m', DATE(c_in.created_dt)) AS INT64) THEN 0 ELSE 1 END ASC,
+          ad_in.load_datetime DESC
+      ) AS rn
+    FROM `cuscare-data-prod.cases.cus_claim` c_in
+    JOIN `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated` ad_in
+      ON LOWER(c_in.agent_email) = LOWER(ad_in.agent_email)
+  ) ad ON c.ticket_id = ad.ticket_id AND ad.rn = 1
   left join sap on lower(c.agent_email)=sap.employee_email
   WHERE 1=1
     AND DATE(created_dt) >= start_date

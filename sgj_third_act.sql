@@ -386,9 +386,8 @@ agents_conv AS (
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY ps.conversation_id, ps.participant_id
     ORDER BY
+      ABS(DATE_DIFF(PARSE_DATE('%Y%m', CAST(s.period_id AS STRING)), DATE_TRUNC(DATE(ps.load_datetime), MONTH), MONTH)) ASC,
       CASE WHEN s.period_id >= CAST(FORMAT_DATE('%Y%m', DATE(ps.load_datetime)) AS INT64) THEN 0 ELSE 1 END ASC,
-      CASE WHEN s.period_id >= CAST(FORMAT_DATE('%Y%m', DATE(ps.load_datetime)) AS INT64) THEN s.period_id ELSE NULL END ASC,
-      CASE WHEN s.period_id < CAST(FORMAT_DATE('%Y%m', DATE(ps.load_datetime)) AS INT64) THEN s.period_id ELSE NULL END DESC,
       s.load_datetime DESC
   ) = 1
 ),
@@ -519,7 +518,7 @@ final_base AS (
     d.nota_calidad,
     base.agent_bp AS last_agent_bp_number,
     na.agent_name AS last_agent_name,
-    COALESCE(sl.supervisor_bp_number, sl_bp.supervisor_bp_number) AS last_supervisor_bp_number,
+    COALESCE(sl_bp.supervisor_bp_number, sl.supervisor_bp_number) AS last_supervisor_bp_number,
     ag.all_agent_bp_numbers,
     ag.all_supervisor_bp_numbers,
     r.is_hvc,
@@ -544,40 +543,23 @@ final_base AS (
   LEFT JOIN compliance_unique d       ON base.conversation_id = d.conversation_id AND (d.agent_id IS NULL OR base.agent_id = d.agent_id)
   LEFT JOIN name_agent        na      ON base.agent_bp        = na.agent_bp_number
   LEFT JOIN (
-    SELECT
-      base_in.conversation_id,
-      s_in.supervisor_bp_number,
-      ROW_NUMBER() OVER (
-        PARTITION BY base_in.conversation_id
-        ORDER BY
-          CASE WHEN s_in.period_id >= CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN 0 ELSE 1 END ASC,
-          CASE WHEN s_in.period_id >= CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN s_in.period_id ELSE NULL END ASC,
-          CASE WHEN s_in.period_id < CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN s_in.period_id ELSE NULL END DESC,
-          s_in.load_datetime DESC
-      ) AS rn
-    FROM basefinal AS base_in
-    JOIN `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated` AS s_in
-      ON base_in.agent_id = s_in.agent_id
-  ) sl ON base.conversation_id = sl.conversation_id AND sl.rn = 1
+    SELECT agent_bp_number, supervisor_bp_number, period_id
+    FROM `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated`
+    WHERE agent_bp_number IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY agent_bp_number, period_id ORDER BY load_datetime DESC) = 1
+  ) sl_bp ON base.agent_bp = sl_bp.agent_bp_number
+         AND sl_bp.period_id = CAST(FORMAT_DATE('%Y%m', base.call_date) AS INT64)
   LEFT JOIN (
-    SELECT
-      base_in.conversation_id,
-      s_in.supervisor_bp_number,
-      ROW_NUMBER() OVER (
-        PARTITION BY base_in.conversation_id
-        ORDER BY
-          CASE WHEN s_in.period_id >= CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN 0 ELSE 1 END ASC,
-          CASE WHEN s_in.period_id >= CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN s_in.period_id ELSE NULL END ASC,
-          CASE WHEN s_in.period_id < CAST(FORMAT_DATE('%Y%m', base_in.call_date) AS INT64) THEN s_in.period_id ELSE NULL END DESC,
-          s_in.load_datetime DESC
-      ) AS rn
-    FROM basefinal AS base_in
-    JOIN `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated` AS s_in
-      ON base_in.agent_bp = s_in.agent_bp_number
-  ) sl_bp ON base.conversation_id = sl_bp.conversation_id AND sl_bp.rn = 1
+    SELECT agent_id, supervisor_bp_number, period_id
+    FROM `cuscare-data-prod.contact_center_staffing.contact_center_staff_consolidated`
+    WHERE agent_id IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY agent_id, period_id ORDER BY load_datetime DESC) = 1
+  ) sl ON base.agent_id = sl.agent_id
+      AND sl.period_id = CAST(FORMAT_DATE('%Y%m', base.call_date) AS INT64)
   LEFT JOIN agents_agg        ag      ON base.conversation_id = ag.conversation_id
   LEFT JOIN retention         r       ON base.conversation_id = r.conversation_id
 ),
+
 
 -- ============================================================
 -- FACTOR PCA (proporcionalidad por categoría)
